@@ -8,10 +8,6 @@ use std::{
 const MAX_LOST_SIZE: usize = 10;
 const DATA_SZ: usize = 512;
 const FRAME_SZ: usize = 8 + 4 + 2 + DATA_SZ;
-// s
-const SERVER_READ_TIMEOUT: u64 = 5;
-// ms
-const CLIENT_READ_TIMEOUT: u64 = 500;
 
 struct PktState {
     pkt_id: u64,
@@ -70,7 +66,6 @@ impl PktServer {
         let (_, addr) = self.sock.recv_from(&mut buf)?;
 
         let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.set_read_timeout(Some(Duration::from_secs(SERVER_READ_TIMEOUT)))?;
         sock.connect(addr)?;
         sock.send(&buf)?;
         Ok(PktConn { sock, pkt_id: 0 })
@@ -89,7 +84,6 @@ impl PktConn {
     {
         let mut buf = [0; FRAME_SZ];
         let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.set_read_timeout(Some(Duration::from_millis(CLIENT_READ_TIMEOUT)))?;
         sock.send_to(&buf, addr)?;
         let (_, addr) = sock.recv_from(&mut buf)?;
         sock.connect(addr)?;
@@ -144,6 +138,10 @@ impl PktConn {
         self.sock.send(&buf)?;
 
         Ok(pkt_state.pkt)
+    }
+
+    pub fn set_frame_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.sock.set_read_timeout(timeout)
     }
 }
 
