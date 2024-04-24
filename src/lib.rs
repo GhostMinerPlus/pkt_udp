@@ -1,9 +1,8 @@
 use std::{
-    collections::BTreeSet,
-    io::{self, Error, ErrorKind},
-    net::{ToSocketAddrs, UdpSocket},
-    time::Duration,
+    collections::BTreeSet, io::{self, Error, ErrorKind}
 };
+
+use tokio::net::{ToSocketAddrs, UdpSocket};
 
 const MAX_LOST_SIZE: usize = 10;
 const DATA_SZ: usize = 512;
@@ -53,21 +52,21 @@ pub struct PktServer {
 }
 
 impl PktServer {
-    pub fn listen<A>(addr: A) -> io::Result<Self>
+    pub async fn listen<A>(addr: A) -> io::Result<Self>
     where
         A: ToSocketAddrs,
     {
-        let sock = UdpSocket::bind(addr)?;
+        let sock = UdpSocket::bind(addr).await?;
         Ok(Self { sock })
     }
 
-    pub fn accept(&self) -> io::Result<PktConn> {
+    pub async fn accept(&self) -> io::Result<PktConn> {
         let mut buf = [0; FRAME_SZ];
-        let (_, addr) = self.sock.recv_from(&mut buf)?;
+        let (_, addr) = self.sock.recv_from(&mut buf).await?;
 
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.connect(addr)?;
-        sock.send(&buf)?;
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        sock.connect(addr).await?;
+        sock.send(&buf).await?;
         Ok(PktConn { sock, pkt_id: 0 })
     }
 }
@@ -78,19 +77,19 @@ pub struct PktConn {
 }
 
 impl PktConn {
-    pub fn connect<A>(addr: A) -> io::Result<Self>
+    pub async fn connect<A>(addr: A) -> io::Result<Self>
     where
         A: ToSocketAddrs,
     {
         let mut buf = [0; FRAME_SZ];
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.send_to(&buf, addr)?;
-        let (_, addr) = sock.recv_from(&mut buf)?;
-        sock.connect(addr)?;
+        let sock = UdpSocket::bind("0.0.0.0:0").await?;
+        sock.send_to(&buf, addr).await?;
+        let (_, addr) = sock.recv_from(&mut buf).await?;
+        sock.connect(addr).await?;
         Ok(Self { sock, pkt_id: 0 })
     }
 
-    pub fn send(&mut self, pkt: &[u8]) -> io::Result<()> {
+    pub async fn send(&mut self, pkt: &[u8]) -> io::Result<()> {
         self.pkt_id += 1;
         let pkt_sz = pkt.len() as u32;
 
@@ -104,25 +103,25 @@ impl PktConn {
         while p < q {
             buf[12..14].copy_from_slice(&frame_no.to_be_bytes());
             buf[14..(q - p) + 14].copy_from_slice(&pkt[p..q]);
-            self.sock.send(&buf)?;
+            self.sock.send(&buf).await?;
 
             frame_no += 1;
             p = q;
             q += std::cmp::min(DATA_SZ, pkt_sz as usize - p);
         }
 
-        while let Ok(_) = self.sock.recv(&mut buf) {
-            if false == self.retransmit(&mut buf, pkt_sz, &pkt)? {
+        while let Ok(_) = self.sock.recv(&mut buf).await {
+            if false == self.retransmit(&mut buf, pkt_sz, &pkt).await? {
                 break;
             }
         }
         Ok(())
     }
 
-    pub fn recv(&self) -> io::Result<Vec<u8>> {
+    pub async fn recv(&self) -> io::Result<Vec<u8>> {
         let mut buf = [0; FRAME_SZ];
 
-        self.sock.recv(&mut buf)?;
+        self.sock.recv(&mut buf).await?;
         let pkt_id: u64 = buf[0..8].iter().fold(0, |acc, &b| acc << 8 | b as u64);
         let pkt_sz: u32 = buf[8..12].iter().fold(0, |acc, &b| acc << 8 | b as u32);
         let frame_no: u16 = buf[12..14].iter().fold(0, |acc, &b| acc << 8 | b as u16);
@@ -131,22 +130,19 @@ impl PktConn {
 
         let mut retry_times = MAX_LOST_SIZE;
         while !pkt_state.set.is_empty() {
-            self.pull(&mut buf, &mut pkt_state, &mut retry_times)?;
+            self.pull(&mut buf, &mut pkt_state, &mut retry_times)
+                .await?;
         }
         buf[0..8].copy_from_slice(&pkt_state.pkt_id.to_be_bytes());
         buf[8..12].copy_from_slice(&0u32.to_be_bytes());
-        self.sock.send(&buf)?;
+        self.sock.send(&buf).await?;
 
         Ok(pkt_state.pkt)
-    }
-
-    pub fn set_frame_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.sock.set_read_timeout(timeout)
     }
 }
 
 impl PktConn {
-    fn retransmit(&self, buf: &mut [u8], pkt_sz: u32, pkt: &[u8]) -> io::Result<bool> {
+    async fn retransmit(&self, buf: &mut [u8], pkt_sz: u32, pkt: &[u8]) -> io::Result<bool> {
         let f_pkt_id = buf[0..8].iter().fold(0, |acc, &b| acc << 8 | b as u64);
         if f_pkt_id != self.pkt_id {
             return Ok(true);
@@ -160,11 +156,11 @@ impl PktConn {
         let q = p + std::cmp::min(DATA_SZ, pkt_sz as usize - p);
         buf[12..14].copy_from_slice(&frame_no.to_be_bytes());
         buf[14..(q - p) + 14].copy_from_slice(&pkt[p..q]);
-        self.sock.send(&buf)?;
+        self.sock.send(&buf).await?;
         return Ok(true);
     }
 
-    fn request_retransmission(
+    async fn request_retransmission(
         &self,
         retry_times: &mut usize,
         pkt_state: &PktState,
@@ -184,19 +180,19 @@ impl PktConn {
             buf[0..8].copy_from_slice(&pkt_state.pkt_id.to_be_bytes());
             buf[8..12].copy_from_slice(&(pkt_state.pkt.len() as u32).to_be_bytes());
             buf[12..14].copy_from_slice(&no.to_be_bytes());
-            self.sock.send(&buf)?;
+            self.sock.send(&buf).await?;
         }
 
         Ok(())
     }
 
-    fn pull(
+    async fn pull(
         &self,
         buf: &mut [u8],
         pkt_state: &mut PktState,
         retry_times: &mut usize,
     ) -> io::Result<()> {
-        match self.sock.recv(buf) {
+        match self.sock.recv(buf).await {
             Ok(sz) => {
                 if sz != FRAME_SZ {
                     return Ok(());
@@ -213,6 +209,7 @@ impl PktConn {
             Err(e) => {
                 if e.kind() == ErrorKind::TimedOut {
                     self.request_retransmission(retry_times, &pkt_state, buf)
+                        .await
                 } else {
                     Err(e)
                 }
